@@ -1,55 +1,58 @@
-//  Note: requires node 12.
+// Note: requires Node.js 12
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const readline = require('readline');
-const child_process = require('child_process')
+const child_process = require('child_process');
 
-//  Regexes we'll use repeatedly to find image tags or markdown images.
-const rexImgTag = new RegExp(/<img\s+([^>]*)[/]?>/);
-const regImgSrcAttribute = new RegExp(/src=\"([^"]+)"/);
-const regImgAltAttribute = new RegExp(/alt=\"([^"]+)"/);
-const regImgWidthAttribute = new RegExp(/width=\"([^"]+)"/);
-const rexMarkdownImage = new RegExp(/\!\[([^\]]*)\]\(([^\)]+)\)/);
+// Regex for finding image tags and markdown images
+const rexImgTag = /<img\s+([^>]*)[/]?>/;
+const regImgSrcAttribute = /src=\"([^"]+)"/;
+const regImgAltAttribute = /alt=\"([^"]+)"/;
+const regImgWidthAttribute = /width=\"([^"]+)"/;
+const rexMarkdownImage = /\!\[([^\]]*)\]\(([^\)]+)\)/;
 
 /**
- * moveFileSafeSync - move src to dest, ensuring all required folders in the
- * destination are created.
+ * moveFileSafeSync - Move src to dest, ensuring the destination folder exists.
  *
- * @param src - the source file path
- * @param dest - the destination file path
- * @returns {undefined}
+ * @param {string} src - The source file path.
+ * @param {string} dest - The destination file path.
  */
 function moveFileSafeSync(src, dest) {
-  //  If the source doesn't exist, but the destination does, we've probably
-  //  just already processed the file.
-  if (!fs.existsSync(src) && fs.existsSync(dest)) return;
+  if (!fs.existsSync(src) && fs.existsSync(dest)) return; // Skip if file already moved
 
   const directory = path.dirname(dest);
-  if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true } );
+  if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true });
+  
   fs.copyFileSync(src, dest);
   fs.unlinkSync(src);
 }
 
 /**
- * downloadFile - download a file from the web, ensures the folder for the
- * destination exists.
+ * downloadFile - Download a file from the web to the destination folder.
  *
- * @param src - the source fiile
- * @param dest - the download destination
- * @returns {undefined}
+ * @param {string} src - The URL of the file.
+ * @param {string} dest - The destination path.
  */
 function downloadFile(src, dest) {
   const directory = path.dirname(dest);
-  if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true } );
+  if (!fs.existsSync(directory)) fs.mkdirSync(directory, { recursive: true });
+  
   const command = `wget "${src}" -P "${directory}"`;
   return child_process.execSync(command);
 }
 
-// Thanks: https://gist.github.com/kethinov/6658166
-function findInDir (dir, filter, fileList = []) {
+/**
+ * findInDir - Recursively find all files in a directory matching the filter.
+ *
+ * @param {string} dir - The directory to search.
+ * @param {RegExp} filter - Regex to filter files.
+ * @param {Array} fileList - Accumulator for matching files.
+ * @returns {Array} List of matching file paths.
+ */
+function findInDir(dir, filter, fileList = []) {
   const files = fs.readdirSync(dir);
-
+  
   files.forEach((file) => {
     const filePath = path.join(dir, file);
     const fileStat = fs.lstatSync(filePath);
@@ -65,118 +68,73 @@ function findInDir (dir, filter, fileList = []) {
 }
 
 /**
- * processPost
+ * processPost - Process a blog post and co-locate image files.
  *
- * @param rootPath
- * @param postPath
- * @returns {undefined}
+ * @param {string} rootPath - The root directory for the blog.
+ * @param {string} postPath - The path to the blog post file.
+ * @returns {Promise<void>} A promise that resolves when processing is complete.
  */
 function processPost(rootPath, postPath) {
   return new Promise((resolve, reject) => {
-    //  Get some details about the post which will be useful.
     const postDirectory = path.dirname(postPath);
     const postFileName = path.basename(postPath);
-    console.log(`  Processing: ${postFileName}`);
+    console.log(`Processing: ${postFileName}`);
 
-    //  Create the input and output streams. Track whether we change the file.
     const updatedPostPath = `${postPath}.updated`;
     const inputStream = fs.createReadStream(postPath);
-    const outputStream = fs.createWriteStream(updatedPostPath, { encoding: 'utf8'} );
+    const outputStream = fs.createWriteStream(updatedPostPath, { encoding: 'utf8' });
     let changed = false;
 
-    //  Read the file line-wise.
-    const rl = readline.createInterface({
-        input: inputStream,
-        terminal: false,
-        historySize: 0
-    });
+    const rl = readline.createInterface({ input: inputStream, terminal: false });
 
-    //  Process each line, looking for image info.
     rl.on('line', (line) => {
-
-      //  Check for html image tags.
+      // Process HTML image tags
       if (rexImgTag.test(line)) {
-        const imageTagResults = rexImgTag.exec(line);
-        const imageTag = imageTagResults[0];
-        const imageTagInner = imageTagResults[1];
-        console.log(`    Found image tag contents: ${imageTagInner}`);
+        const [, imageTagInner] = rexImgTag.exec(line) || [];
+        const src = regImgSrcAttribute.exec(imageTagInner)?.[1];
+        const alt = regImgAltAttribute.exec(imageTagInner)?.[1];
+        const width = regImgWidthAttribute.exec(imageTagInner)?.[1];
 
-        //  Rip out the component parts.
-        const src = regImgSrcAttribute.test(imageTagInner) && regImgSrcAttribute.exec(imageTagInner)[1];
-        const alt = regImgAltAttribute.test(imageTagInner) && regImgAltAttribute.exec(imageTagInner)[1];
-        const width = regImgWidthAttribute.test(imageTagInner) && regImgWidthAttribute.exec(imageTagInner)[1];
-        console.log(`    src: ${src}, alt: ${alt}, width: ${width}`);
-
-        //  If the source is already in the appropriate location, don't process it.
         if (/^images\//.test(src)) {
-          console.log(`    skipping, already processed`);
           outputStream.write(line + os.EOL);
           return;
         }
 
-        //  Now that we have the details of the image tag, we can work out the
-        //  desired destination in the images folder.
         const imageFileName = path.basename(src);
-        const newRelativePath = path.join("images", imageFileName);
+        const newRelativePath = path.join('images', imageFileName);
         const newAbsolutePath = path.join(postDirectory, newRelativePath);
 
-        //  If the file is on the web, we need to download it...
         if (/^http/.test(src)) {
-          console.log(`    Downloading '${src}' to '${newAbsolutePath}'...`);
           downloadFile(src, newAbsolutePath);
-        }
-        //  ...otherwise we can just move it.
-        else {
-          const absoluteSrc = path.join(rootPath, src);
-          moveFileSafeSync(absoluteSrc, newAbsolutePath);
-          console.log(`    Copied '${absoluteSrc}' to '${newAbsolutePath}'`);
+        } else {
+          moveFileSafeSync(path.join(rootPath, src), newAbsolutePath);
         }
 
-        //  Now re-write the image tag.
         const newImgTag = `<img src="${newRelativePath}"${alt ? ` alt="${alt}"` : ''}${width ? ` width="${width}"` : ''} />`;
-        console.log(`    Changing : ${imageTag}`);
-        console.log(`    To       : ${newImgTag}`);
-        line = line.replace(imageTag, newImgTag);
+        line = line.replace(rexImgTag, newImgTag);
         changed = true;
       }
-      
-      //  Check for markdown image tags.
-      if (rexMarkdownImage.test(line)) {
-        const markdownImageCaptures = rexMarkdownImage.exec(line);
-        const markdownImage = markdownImageCaptures[0];
-        const markdownImageDescription = markdownImageCaptures[1];
-        const markdownImagePath = markdownImageCaptures[2];
-        console.log(`    Found markdown image: ${markdownImagePath}`);
 
-        //  If the source is already in the appropriate location, don't process it.
-        if (/^images\//.test(markdownImagePath)) {
-          console.log(`    skipping, already processed`);
+      // Process Markdown image tags
+      if (rexMarkdownImage.test(line)) {
+        const [markdownImage, markdownAlt, markdownSrc] = rexMarkdownImage.exec(line) || [];
+        
+        if (/^images\//.test(markdownSrc)) {
           outputStream.write(line + os.EOL);
           return;
         }
 
-        //  Now that we have the details of the image tag, we can work out the
-        //  desired destination in the images folder.
-        const imageFileName = path.basename(markdownImagePath);
-        const newRelativePath = path.join("images", imageFileName);
+        const imageFileName = path.basename(markdownSrc);
+        const newRelativePath = path.join('images', imageFileName);
         const newAbsolutePath = path.join(postDirectory, newRelativePath);
 
-        //  If the file is on the web, we need to download it...
-        if (/^http/.test(markdownImagePath)) {
-          console.log(`    Downloading '${markdownImagePath}' to '${newAbsolutePath}'...`);
-          downloadFile(markdownImagePath, newAbsolutePath);
-        }
-        //  ...otherwise we can just move it.
-        else {
-          const absoluteSrc = path.join(rootPath, markdownImagePath);
-          moveFileSafeSync(absoluteSrc, newAbsolutePath);
-          console.log(`    Copied '${absoluteSrc}' to '${newAbsolutePath}'`);
+        if (/^http/.test(markdownSrc)) {
+          downloadFile(markdownSrc, newAbsolutePath);
+        } else {
+          moveFileSafeSync(path.join(rootPath, markdownSrc), newAbsolutePath);
         }
 
-        //  Now re-write the markdown.
-        const newMarkdownImage = `![${markdownImageDescription}](${newRelativePath})`;
-        console.log(`    Changing : ${markdownImage}`);
-        console.log(`    To       : ${newMarkdownImage}`);
+        const newMarkdownImage = `![${markdownAlt}](${newRelativePath})`;
         line = line.replace(markdownImage, newMarkdownImage);
         changed = true;
       }
@@ -184,37 +142,32 @@ function processPost(rootPath, postPath) {
       outputStream.write(line + os.EOL);
     });
 
-
-    rl.on('error', (err) => {
-      console.log(`  Error reading file: ${err}`);
-      return reject(err);
-    });
-
+    rl.on('error', (err) => reject(err));
     rl.on('close', () => {
-      console.log(`  Completed, written to: ${updatedPostPath}`);
-      if (changed) moveFileSafeSync(updatedPostPath, postPath);
-      else fs.unlinkSync(updatedPostPath);
-      return resolve();
+      if (changed) {
+        moveFileSafeSync(updatedPostPath, postPath);
+      } else {
+        fs.unlinkSync(updatedPostPath);
+      }
+      resolve();
     });
   });
 }
 
-console.log("collect-images: Tool to co-locate blog post images")
-console.log("");
+console.log("collect-images: Tool to co-locate blog post images");
 
-//  Get the directory to search. Arg 0 is node, Arg 1 iis the script path, Arg 3 onwards are commandline arguments.
+// Get the directories to search
 const sourceDirectory = process.argv[2] || process.cwd();
-console.log(`Source Directory: ${sourceDirectory}`);
 const rootDirectory = process.argv[3] || sourceDirectory;
+console.log(`Source Directory: ${sourceDirectory}`);
 console.log(`Root Directory: ${rootDirectory}`);
-console.log("");
 
-//  Find all blog posts.
+// Find all blog posts
 const postPaths = findInDir(sourceDirectory, /\.md$/);
 
-//  Process each path.
+// Process each post
 postPaths.forEach(postPath => processPost(rootDirectory, postPath));
 
-//  Let the user know we're done.
+// Done
 console.log(`Completed processing ${postPaths.length} file(s)`);
 
